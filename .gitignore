@@ -1,0 +1,14 @@
+# Compiled MQL5 output and MetaEditor files
+*.ex5
+*.ex4
+*.log
+*.mqproj
+*.bak
+*.tmp
+
+# OS / editor
+Thumbs.db
+Desktop.ini
+.DS_Store
+.vscode/
+.idea/
