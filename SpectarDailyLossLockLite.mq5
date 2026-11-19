@@ -16,7 +16,7 @@
 //| symbols. Works on hedging and netting accounts.                  |
 //+------------------------------------------------------------------+
 #property copyright   "Spectar FX"
-#property version     "1.01"
+#property version     "1.02"
 #property description "Spectar Daily Loss Lock (Lite)"
 #property description "When your daily loss limit is reached: closes positions, deletes"
 #property description "pending orders and keeps the day locked until the next daily reset"
@@ -53,6 +53,11 @@ input group "Display"
 input bool           InpShowPanel           = true;  // Show on-chart panel
 input bool           InpAlertOnLock         = true;  // Pop-up alert when the day locks
 
+input group "Share card (PNG image in MQL5/Files, no account data on it)"
+input bool           InpMakeCard            = true;  // Save a card when the day locks or a streak milestone is reached
+input bool           InpCardButton          = true;  // Show the "Share card" button on the chart
+input bool           InpCardOnStart         = false; // Make one card now, when the tool is attached
+
 input group "Strategy Tester only (ignored on live/demo accounts)"
 input bool           InpTesterDemoTrades    = true;  // Tester: open demo trades so the lock can be seen
 input int            InpTesterHoldMinutes   = 240;   // Tester: close a demo trade after N minutes
@@ -61,7 +66,7 @@ input int            InpTesterHoldMinutes   = 240;   // Tester: close a demo tra
 // Constants
 //==================================================================
 #define SDLL_NAME          "Spectar Daily Loss Lock (Lite)"
-#define SDLL_VER           "1.01"
+#define SDLL_VER           "1.02"
 #define SECONDS_PER_DAY    86400
 #define FRESH_WINDOW_SEC   300   // equity captured within 5 min after reset = "exact"
 
@@ -83,6 +88,12 @@ bool     g_histDirty      = true;  // recalc history on next evaluation
 bool     g_busy           = false; // re-entrancy guard for enforcement
 
 string   g_warning        = "";    // last warning shown on the panel
+int      g_streak         = 0;     // trading days in a row the tool ran and the limit was not reached
+string   g_cardInfo       = "";    // last saved share card (shown on the panel)
+bool     g_cardStartDone  = false; // InpCardOnStart handled
+#define  SDLL_BTN_CARD    "SDLL_btn_card"
+#define  SDLL_CARD_PREFIX "SDLL_card_"
+#define  SDLL_SITE        "spectarfx.com"
 int      g_failedPositions= 0;     // positions we could not close in last pass
 int      g_failedOrders   = 0;     // orders we could not delete in last pass
 datetime g_lastFailLog    = 0;     // throttle for repeated failure messages
@@ -211,6 +222,7 @@ bool EnsureDay()
       g_sodBalance     = GVGet("sodbal", 0);
       g_sodEquity      = GVGet("sodeq", 0);
       g_sodEquityKnown = (GVGet("eqknown", 0) > 0.5);
+      g_streak         = (int)GVGet("streak", 0);
      }
    else
      {
@@ -241,6 +253,25 @@ bool EnsureDay()
          g_sodEquity      = g_sodBalance;   // unknown -> fall back to balance
          g_sodEquityKnown = false;
         }
+
+      // Streak: the previous stored day was the last trading day (weekend gap allowed) and was not locked.
+      datetime prevDay  = (datetime)GVGet("day", 0);
+      datetime lockDay  = (datetime)GVGet("lastlockday", 0);
+      int      streak   = (int)GVGet("streak", 0);
+      if(prevDay > 0 && ds > prevDay)
+        {
+         bool consecutive = ((ds - prevDay) <= 4 * SECONDS_PER_DAY);
+         if(lockDay == prevDay)
+            streak = 0;
+         else if(consecutive)
+            streak++;
+         else
+            streak = 0;                    // the tool was not running: the streak is unknown, start again
+         GVSet("streak", (double)streak);
+         if(InpMakeCard && (streak == 5 || streak == 10 || streak == 20 || (streak >= 30 && streak % 30 == 0)))
+            MakeCard(false, streak);
+        }
+      g_streak = streak;
 
       GVSet("day", (double)ds);
       GVSet("sodbal", g_sodBalance);
@@ -308,6 +339,9 @@ void ActivateLock(const double loss, const double limit)
    g_lockTime  = now;
    GVSet("lockuntil", (double)g_lockUntil);
    GVSet("locktime", (double)g_lockTime);
+   GVSet("lastlockday", (double)g_dayStart);
+   GVSet("streak", 0.0);
+   g_streak = 0;
    GlobalVariablesFlush();                  // write to disk now, survive a crash
 
    string msg = StringFormat("%s: DAILY LOSS LIMIT REACHED (loss %.2f %s, limit %.2f). Day locked until %s server time.",
@@ -316,6 +350,133 @@ void ActivateLock(const double loss, const double limit)
    Print(msg);
    if(InpAlertOnLock && !MQLInfoInteger(MQL_TESTER))
       Alert(msg);
+   if(InpMakeCard)
+      MakeCard(true, 0);
+  }
+
+//+------------------------------------------------------------------+
+//| Share card: a PNG image the trader can post. No account number,  |
+//| no balance, no amounts - only the fact, the date and the tool.   |
+//+------------------------------------------------------------------+
+void CardLabel(const string id, const string text, const int x, const int y, const int size,
+               const color clr, const string font)
+  {
+   string name = SDLL_CARD_PREFIX + id;
+   ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
+   ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, name, OBJPROP_XDISTANCE, x);
+   ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y);
+   ObjectSetInteger(0, name, OBJPROP_FONTSIZE, size);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
+   ObjectSetString(0, name, OBJPROP_FONT, font);
+   ObjectSetString(0, name, OBJPROP_TEXT, text);
+   ObjectSetInteger(0, name, OBJPROP_BACK, false);
+   ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+   ObjectSetInteger(0, name, OBJPROP_ZORDER, 10);
+  }
+
+bool MakeCard(const bool lockedCard, const int streak)
+  {
+   if(MQLInfoInteger(MQL_TESTER))
+      return false;                         // screenshots are not available in the Strategy Tester
+   const int W = 800, H = 420;
+   Comment("");
+   if(ObjectFind(0, SDLL_BTN_CARD) >= 0)
+      ObjectSetInteger(0, SDLL_BTN_CARD, OBJPROP_TIMEFRAMES, OBJ_NO_PERIODS);   // keep the button out of the image
+   const long hadPrice = ChartGetInteger(0, CHART_SHOW_PRICE_SCALE);
+   const long hadDate  = ChartGetInteger(0, CHART_SHOW_DATE_SCALE);
+   ChartSetInteger(0, CHART_SHOW_PRICE_SCALE, false);                           // scales would cover the card
+   ChartSetInteger(0, CHART_SHOW_DATE_SCALE, false);
+
+   string bg = SDLL_CARD_PREFIX + "bg";
+   ObjectCreate(0, bg, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+   ObjectSetInteger(0, bg, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, bg, OBJPROP_XDISTANCE, 0);
+   ObjectSetInteger(0, bg, OBJPROP_YDISTANCE, 0);
+   ObjectSetInteger(0, bg, OBJPROP_XSIZE, W);
+   ObjectSetInteger(0, bg, OBJPROP_YSIZE, H);
+   ObjectSetInteger(0, bg, OBJPROP_BGCOLOR, C'16,20,34');
+   ObjectSetInteger(0, bg, OBJPROP_BORDER_TYPE, BORDER_FLAT);
+   ObjectSetInteger(0, bg, OBJPROP_COLOR, C'212,175,55');
+   ObjectSetInteger(0, bg, OBJPROP_WIDTH, 3);
+   ObjectSetInteger(0, bg, OBJPROP_BACK, false);
+   ObjectSetInteger(0, bg, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, bg, OBJPROP_HIDDEN, true);
+   ObjectSetInteger(0, bg, OBJPROP_ZORDER, 9);
+
+   string day = TimeToString(TimeTradeServer(), TIME_DATE);
+   string head, line1, line2, kind;
+   if(lockedCard)
+     {
+      kind  = "locked";
+      head  = "DAY LOCKED";
+      line1 = "My daily loss limit was reached.";
+      line2 = "The day is closed until the next reset. No more trades today.";
+     }
+   else if(streak <= 0)
+     {
+      kind  = "on";
+      head  = "MY LIMIT IS SET";
+      line1 = "I trade with a daily loss limit.";
+      line2 = "If I reach it, the day closes itself until the next reset.";
+     }
+   else
+     {
+      kind  = "streak";
+      head  = IntegerToString(streak) + (streak == 1 ? " DAY" : " DAYS") + " INSIDE MY LIMIT";
+      line1 = "No daily loss limit breach for " + IntegerToString(streak)
+              + (streak == 1 ? " trading day." : " trading days in a row.");
+      line2 = "The limit is my own number. The tool only holds me to it.";
+     }
+   CardLabel("tag",  "DAILY LOSS LIMIT", 40, 34, 13, C'212,175,55', "Arial Bold");
+   CardLabel("head", head, 40, 84, 26, clrWhite, "Arial Black");
+   CardLabel("l1",   line1, 42, 168, 16, C'225,228,238', "Arial");
+   CardLabel("l2",   line2, 42, 204, 13, C'170,176,196', "Arial");
+   CardLabel("day",  day + "  (broker server date)", 42, 262, 12, C'170,176,196', "Arial");
+   CardLabel("foot", "Spectar Daily Loss Lock  |  free MT5 tool  |  " + SDLL_SITE, 40, 356, 14, C'212,175,55', "Arial Bold");
+   CardLabel("risk", "A setting, not a promise. Trading involves risk.", 42, 386, 9, C'120,126,146', "Arial");
+   ChartRedraw(0);
+
+   string d = day;
+   StringReplace(d, ".", "");
+   string file = "SpectarCard_" + kind + "_" + d + ".png";
+   bool ok = ChartScreenShot(0, file, W, H, ALIGN_LEFT);
+
+   ObjectsDeleteAll(0, SDLL_CARD_PREFIX);
+   ChartSetInteger(0, CHART_SHOW_PRICE_SCALE, hadPrice);
+   ChartSetInteger(0, CHART_SHOW_DATE_SCALE, hadDate);
+   if(ObjectFind(0, SDLL_BTN_CARD) >= 0)
+      ObjectSetInteger(0, SDLL_BTN_CARD, OBJPROP_TIMEFRAMES, OBJ_ALL_PERIODS);
+   ChartRedraw(0);
+   if(ok)
+     {
+      g_cardInfo = "MQL5/Files/" + file;
+      PrintFormat("%s: share card saved: %s (File -> Open Data Folder -> MQL5 -> Files)", SDLL_NAME, file);
+     }
+   else
+      PrintFormat("%s: share card could not be saved (error %d).", SDLL_NAME, GetLastError());
+   return ok;
+  }
+
+void CardButton()
+  {
+   if(!InpCardButton || MQLInfoInteger(MQL_TESTER))
+      return;
+   if(ObjectFind(0, SDLL_BTN_CARD) >= 0)
+      return;
+   ObjectCreate(0, SDLL_BTN_CARD, OBJ_BUTTON, 0, 0, 0);
+   ObjectSetInteger(0, SDLL_BTN_CARD, OBJPROP_CORNER, CORNER_RIGHT_LOWER);
+   ObjectSetInteger(0, SDLL_BTN_CARD, OBJPROP_XDISTANCE, 130);
+   ObjectSetInteger(0, SDLL_BTN_CARD, OBJPROP_YDISTANCE, 40);
+   ObjectSetInteger(0, SDLL_BTN_CARD, OBJPROP_XSIZE, 120);
+   ObjectSetInteger(0, SDLL_BTN_CARD, OBJPROP_YSIZE, 26);
+   ObjectSetInteger(0, SDLL_BTN_CARD, OBJPROP_FONTSIZE, 9);
+   ObjectSetInteger(0, SDLL_BTN_CARD, OBJPROP_COLOR, clrBlack);
+   ObjectSetInteger(0, SDLL_BTN_CARD, OBJPROP_BGCOLOR, C'212,175,55');
+   ObjectSetString(0, SDLL_BTN_CARD, OBJPROP_TEXT, "Share card");
+   ObjectSetInteger(0, SDLL_BTN_CARD, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, SDLL_BTN_CARD, OBJPROP_HIDDEN, true);
   }
 
 //+------------------------------------------------------------------+
@@ -583,8 +744,12 @@ void UpdatePanel(const double base, const double loss, const double limit, const
    txt += "Room left:         " + DoubleToString(room, 2) + " " + cur + "\n";
    txt += "Next reset:        " + TimeToString(g_dayStart + SECONDS_PER_DAY, TIME_DATE | TIME_MINUTES) + " (server)\n";
    txt += "Scope:             " + (InpMagicFilter == 0 ? "all positions, all symbols" : "magic " + IntegerToString(InpMagicFilter) + " only") + "\n";
+   txt += "Streak:            " + IntegerToString(g_streak) + (g_streak == 1 ? " trading day" : " trading days") + " inside the limit\n";
+   if(g_cardInfo != "")
+      txt += "Share card saved:  " + g_cardInfo + "\n";
    if(g_warning != "")
       txt += "WARNING: " + g_warning + "\n";
+   txt += "Free tool by Spectar FX  |  " + SDLL_SITE + "\n";
    Comment(txt);
   }
 
@@ -827,6 +992,7 @@ int OnInit()
       MathSrand(12345);                     // reproducible demo trades in the tester
    EventSetTimer(g_isTester ? 60 : 1);      // live: every second (also without ticks); tester: ticks drive it
    g_histDirty = true;
+   CardButton();
    Evaluate();
    return INIT_SUCCEEDED;
   }
@@ -838,7 +1004,23 @@ void OnDeinit(const int reason)
   {
    EventKillTimer();
    GlobalVariablesFlush();
+   ObjectDelete(0, SDLL_BTN_CARD);
+   ObjectsDeleteAll(0, SDLL_CARD_PREFIX);
    Comment("");
+  }
+
+//+------------------------------------------------------------------+
+//| "Share card" button                                              |
+//+------------------------------------------------------------------+
+void OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam)
+  {
+   if(id == CHARTEVENT_OBJECT_CLICK && sparam == SDLL_BTN_CARD)
+     {
+      ObjectSetInteger(0, SDLL_BTN_CARD, OBJPROP_STATE, false);
+      MakeCard(IsLocked(), g_streak);
+      g_histDirty = true;
+      Evaluate();
+     }
   }
 
 //+------------------------------------------------------------------+
@@ -853,6 +1035,11 @@ void OnTimer()
   {
    g_histDirty = true;                      // refresh closed P/L once per second
    Evaluate();
+   if(InpCardOnStart && !g_cardStartDone)
+     {
+      g_cardStartDone = true;
+      MakeCard(IsLocked(), g_streak);
+     }
   }
 
 //+------------------------------------------------------------------+

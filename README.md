@@ -14,6 +14,7 @@ Single file: [`SpectarDailyLossLockLite.mq5`](SpectarDailyLossLockLite.mq5). No 
 - Acts slightly before the limit if you set a safety buffer.
 - On lock: closes positions (optionally only those with a given magic number), deletes pending orders, shows a pop-up alert and keeps the day locked until the next reset.
 - Shows an on-chart panel with the start values, today's loss, the limit and the lock state, and warns you when Algo Trading is switched off.
+- Counts your streak of trading days inside the limit and (v1.02) can save a small share card image to `MQL5\Files`: "Day locked", "N days inside my limit" or "My limit is set". The card carries no account number, balance or amounts. A **Share card** button on the chart makes one on demand; both can be switched off in the inputs.
 
 ## What it does not do
 
@@ -56,6 +57,7 @@ The base for the percentage limit is either the start-of-day balance or the high
 | Max slippage for closing, points | Deviation allowed on close orders |
 | Close/delete retries | Retries on busy/requote |
 | Show on-chart panel / Pop-up alert | Display options |
+| Save a share card / Share card button / Card on start | Share card image options (v1.02) |
 | Strategy Tester only | Opens demo trades in the tester so the lock can be seen; ignored on live and demo accounts |
 
 ## Limitations (please read)
