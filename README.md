@@ -71,6 +71,10 @@ The base for the percentage limit is either the start-of-day balance or the high
 - **Not a manual-trading block.** See "What it does not do".
 - Always test on a demo account first.
 
+## More free tools
+
+Three more read-only indicators live in [`tools/`](tools/): **Prop Challenge Dashboard** (daily loss from server midnight, static or trailing floor, target, trading days), **Trade Counter** (trades today and losing streak against your own maximum) and **Server Day Clock** (countdown to the next server day and to the weekly close).
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
